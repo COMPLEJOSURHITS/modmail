@@ -1,10 +1,10 @@
+import base64
 import functools
 import re
-import shlex
 import typing
 from difflib import get_close_matches
 from distutils.util import strtobool as _stb  # pylint: disable=import-error
-from itertools import takewhile
+from itertools import takewhile, zip_longest
 from urllib import parse
 
 import discord
@@ -14,7 +14,15 @@ from discord.ext import commands
 def strtobool(val):
     if isinstance(val, bool):
         return val
-    return _stb(str(val))
+    try:
+        return _stb(str(val))
+    except ValueError:
+        val = val.lower()
+        if val == "enable":
+            return 1
+        if val == "disable":
+            return 0
+        raise
 
 
 class User(commands.IDConverter):
@@ -198,8 +206,7 @@ def match_user_id(text: str) -> int:
 def create_not_found_embed(word, possibilities, name, n=2, cutoff=0.6) -> discord.Embed:
     # Single reference of Color.red()
     embed = discord.Embed(
-        color=discord.Color.red(),
-        description=f"**{name.capitalize()} `{word}` cannot be found.**",
+        color=discord.Color.red(), description=f"**{name.capitalize()} `{word}` cannot be found.**"
     )
     val = get_close_matches(word, possibilities, n=n, cutoff=cutoff)
     if val:
@@ -208,35 +215,41 @@ def create_not_found_embed(word, possibilities, name, n=2, cutoff=0.6) -> discor
 
 
 def parse_alias(alias):
-    if "&&" not in alias:
-        if alias.startswith('"') and alias.endswith('"'):
-            return [alias[1:-1]]
-        return [alias]
+    def encode_alias(m):
+        return "\x1AU" + base64.b64encode(m.group(1).encode()).decode() + "\x1AU"
 
-    buffer = ""
-    cmd = []
-    try:
-        for token in shlex.shlex(alias, punctuation_chars="&"):
-            if token != "&&":
-                buffer += " " + token
-                continue
+    def decode_alias(m):
+        return base64.b64decode(m.group(1).encode()).decode()
 
-            buffer = buffer.strip()
-            if buffer.startswith('"') and buffer.endswith('"'):
-                buffer = buffer[1:-1]
-            cmd += [buffer]
-            buffer = ""
-    except ValueError:
-        return []
+    alias = re.sub(
+        r"(?:(?<=^)(?:\s*(?<!\\)(?:\")\s*)|(?<=&&)(?:\s*(?<!\\)(?:\")\s*))(.+?)"
+        r"(?:(?:\s*(?<!\\)(?:\")\s*)(?=&&)|(?:\s*(?<!\\)(?:\")\s*)(?=$))",
+        encode_alias,
+        alias,
+    )
 
-    buffer = buffer.strip()
-    if buffer.startswith('"') and buffer.endswith('"'):
-        buffer = buffer[1:-1]
-    cmd += [buffer]
+    aliases = []
+    for alias in re.split(r"\s*&&\s*", alias):
+        aliases.append(re.sub("\x1AU(.+?)\x1AU", decode_alias, alias))
 
-    if not all(cmd):
-        return []
-    return cmd
+    return aliases
+
+
+def normalize_alias(alias, message):
+    aliases = parse_alias(alias)
+    contents = parse_alias(message)
+
+    final_aliases = []
+    for alias, content in zip_longest(aliases, contents):
+        if alias is None:
+            break
+
+        if content:
+            final_aliases.append(f"{alias} {content}")
+        else:
+            final_aliases.append(alias)
+
+    return final_aliases
 
 
 def format_description(i, names):
